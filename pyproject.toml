@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "voci"
+version = "0.1.0"
+description = "5,000 hours of Italian conversational speech with rich paralinguistic transcription"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    {name = "Antonio Gison", email = "antonio@gison.it"}
+]
+
+dependencies = [
+    "faster-whisper>=1.0.0",
+    "whisperx>=3.0.0",
+    "pyannote.audio>=3.1",
+    "torch>=2.2.0",
+    "torchaudio>=2.2.0",
+    "transformers>=4.40.0",
+    "datasets>=2.18.0",
+    "soundfile>=0.12.0",
+    "librosa>=0.10.0",
+    "pyyaml>=6.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+    "feedparser>=6.0.0",
+    "requests>=2.31.0",
+    "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+]
+training = [
+    "accelerate>=0.28.0",
+    "deepspeed>=0.14.0",
+    "wandb>=0.16.0",
+]
+
+[project.scripts]
+voci = "scripts.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

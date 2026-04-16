@@ -1,0 +1,52 @@
+# Data
+data/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+
+# Models
+models/
+*.pt
+*.bin
+*.safetensors
+*.onnx
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (local overrides)
+configs/local.yaml
+configs/*.local.yaml
+
+# Logs
+logs/
+*.log
+wandb/
+
+# Database
+*.db
+*.sqlite3
+
+# Jupyter
+.ipynb_checkpoints/
