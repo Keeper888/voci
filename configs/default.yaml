@@ -1,0 +1,63 @@
+scraper:
+  data_dir: ./data/raw
+
+  spreaker:
+    enabled: true
+    max_pages_per_keyword: 5
+    max_pages_per_category: 10
+    rate_limit_delay: 1.0
+
+  apple:
+    enabled: true
+    rate_limit_delay: 3.0
+
+  podcast_index:
+    enabled: false  # requires API key
+    # api_key: set via env PODCAST_INDEX_KEY
+    # api_secret: set via env PODCAST_INDEX_SECRET
+
+  download:
+    batch_size: 100
+    max_concurrent: 5
+    max_retries: 3
+    rate_limit_delay: 0.5
+
+  filters:
+    min_duration_minutes: 10
+    max_duration_minutes: 180
+    language: it
+    min_multi_speaker_score: 0.0  # set higher to filter for multi-speaker
+
+pipeline:
+  pass1:
+    model: large-v3-turbo
+    device: cuda
+    compute_type: float16
+    beam_size: 5
+    language: it
+    batch_size: 16
+    concurrent_files: 8
+
+  pass2:
+    pretrain:
+      base_model: wavlm-base-plus
+      epochs: 3
+      learning_rate: 5e-5
+      batch_size: 32
+      max_audio_length: 30
+      fp16: true
+    finetune:
+      epochs: 20
+      learning_rate: 1e-4
+      batch_size: 16
+      fp16: true
+    inference:
+      concurrent_files: 12
+
+quality:
+  min_asr_confidence: 0.80
+  min_para_confidence: 0.70
+  min_segment_duration: 0.3
+  max_segment_duration: 120
+  min_language_purity: 0.90
+  max_speakers_per_episode: 10

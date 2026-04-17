@@ -44,7 +44,7 @@ training = [
 ]
 
 [project.scripts]
-voci = "scripts.cli:main"
+voci = "src.scraper.cli:main"
 
 [tool.ruff]
 line-length = 100
