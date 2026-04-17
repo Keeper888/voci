@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -61,10 +62,18 @@ def _is_italian(show_data: dict) -> bool:
     lang = (show_data.get("language") or "").lower()
     if lang in ("it", "ita", "italian", "italiano"):
         return True
+    if lang and not lang.startswith("it"):
+        return False  # Explicit non-Italian language set
     title = (show_data.get("title") or "").lower()
     desc = (show_data.get("description") or "").lower()
     italian_signals = ["italiano", "italiana", "italiani", "italia", "puntata", "episodio"]
     return any(s in title or s in desc for s in italian_signals)
+
+
+def _needs_detail_fetch(show_data: dict) -> bool:
+    """Check if we need to fetch detail for language verification.
+    Skip the detail fetch if we already have language info."""
+    return not show_data.get("language")
 
 
 def _multi_speaker_score(show_data: dict) -> float:
@@ -114,18 +123,34 @@ def discover_by_search(db: VociDB, max_pages_per_keyword: int = 5) -> int:
             if not items:
                 break
 
-            new_in_page = 0
+            # Collect candidates that need detail fetch
+            candidates = []
             for item in items:
                 show = item.get("show") or item
                 source_id = str(show.get("show_id", ""))
-                if not source_id or source_id in known_ids:
-                    continue
+                if source_id and source_id not in known_ids:
+                    candidates.append((source_id, show))
 
-                # Search results don't include language — fetch detail
-                detail = _fetch_show_detail(source_id)
+            # Batch-fetch details concurrently (10 threads)
+            details = {}
+            if candidates:
+                with ThreadPoolExecutor(max_workers=10) as pool:
+                    futures = {
+                        pool.submit(_fetch_show_detail, sid): sid
+                        for sid, _ in candidates
+                    }
+                    for future in as_completed(futures):
+                        sid = futures[future]
+                        try:
+                            details[sid] = future.result()
+                        except Exception:
+                            details[sid] = None
+
+            new_in_page = 0
+            for source_id, show in candidates:
+                detail = details.get(source_id)
                 if detail:
                     show = {**show, **detail}
-                time.sleep(0.3)
 
                 if not _is_italian(show):
                     continue
@@ -189,18 +214,34 @@ def discover_by_category(db: VociDB, max_pages_per_category: int = 10) -> int:
             if not items:
                 break
 
-            new_in_page = 0
+            # Collect candidates
+            candidates = []
             for item in items:
                 show = item.get("show") or item
                 source_id = str(show.get("show_id", ""))
-                if not source_id or source_id in known_ids:
-                    continue
+                if source_id and source_id not in known_ids:
+                    candidates.append((source_id, show))
 
-                # Fetch detail for language field
-                detail = _fetch_show_detail(source_id)
+            # Batch-fetch details concurrently
+            details = {}
+            if candidates:
+                with ThreadPoolExecutor(max_workers=10) as pool:
+                    futures = {
+                        pool.submit(_fetch_show_detail, sid): sid
+                        for sid, _ in candidates
+                    }
+                    for future in as_completed(futures):
+                        sid = futures[future]
+                        try:
+                            details[sid] = future.result()
+                        except Exception:
+                            details[sid] = None
+
+            new_in_page = 0
+            for source_id, show in candidates:
+                detail = details.get(source_id)
                 if detail:
                     show = {**show, **detail}
-                time.sleep(0.3)
 
                 if not _is_italian(show):
                     continue
