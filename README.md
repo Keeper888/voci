@@ -1,213 +1,171 @@
 # Voci
 
-**5,000 hours of Italian conversational speech with rich paralinguistic transcription.**
+**Italian conversational speech dataset pipeline — from podcast scraping to training-ready stereo audio.**
 
-Voci (Italian for "voices") is an open-source pipeline that builds a large-scale Italian conversational speech dataset from publicly available podcasts. Unlike existing datasets that produce sanitized text, Voci preserves the full texture of real conversation — hesitations, laughter, sarcasm, fillers, false starts, and emotional tone.
+Voci (Italian for "voices") scrapes Italian podcasts, strips background music, diarizes speakers, transcribes with Whisper, and outputs stereo WAV + JSON transcripts in [moshi-finetune](https://github.com/kyutai-labs/moshi-finetune) format. Built for training [Project Ara](https://github.com/Keeper888/project-ara) — a real-time Italian voice agent based on NVIDIA PersonaPlex.
 
-## Why
+## Architecture
 
-Current Italian speech datasets are either too small, too clean, or based on read speech (audiobooks, parliament). None of them capture how Italians actually talk. Conversational AI trained on clean transcripts sounds robotic because it never learned the "shade" — the paralinguistic layer that makes human conversation human.
-
-Voci solves this with a two-pass pipeline:
-
-1. **Pass 1 — ASR + Diarization**: WhisperX (faster-whisper + pyannote) produces high-accuracy transcripts with speaker labels and timestamps
-2. **Pass 2 — Paralinguistic Detection**: Self-supervised models (HuBERT/WavLM) pre-trained on the full unlabeled corpus, then fine-tuned on a small manually annotated subset, detect and label non-verbal events that Whisper ignores
-
-The result is a dataset where every utterance includes not just *what* was said, but *how* — with speaker identity, emotional cues, and conversational dynamics.
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         VOCI PIPELINE                                   │
+│                                                                         │
+│  PHASE 1 — DISCOVERY & DOWNLOAD                                        │
+│  ┌──────────────┐    ┌───────────────┐    ┌──────────────────┐         │
+│  │ Spreaker API  │    │ Podcast Index │    │  Apple Charts    │         │
+│  │ (primary)     │    │ (lang=it)     │    │  (top Italian)   │         │
+│  └──────┬───────┘    └───────┬───────┘    └────────┬─────────┘         │
+│         └────────────────────┼─────────────────────┘                    │
+│                              ▼                                          │
+│                   ┌──────────────────┐                                  │
+│                   │  SQLite Index DB  │  5,064 shows / 466k episodes   │
+│                   │  (index.db)       │  174,955h cataloged            │
+│                   └────────┬─────────┘                                  │
+│                            ▼                                            │
+│                   ┌──────────────────┐                                  │
+│                   │ Diverse Downloader│  Max 5 eps/show for speaker    │
+│                   │ (diverse_download)│  diversity, skip monologues    │
+│                   └────────┬─────────┘                                  │
+│                            │                                            │
+│  PHASE 2 — CONVERSION (runs on 2x DGX Spark Blackwell GPUs)           │
+│                            ▼                                            │
+│              ┌─────────────────────────┐                               │
+│         Step 1│  FFmpeg Resample        │  MP3 → 24kHz mono WAV       │
+│              └────────────┬────────────┘                               │
+│                           ▼                                             │
+│              ┌─────────────────────────┐                               │
+│         Step 2│  Demucs (htdemucs)      │  Strip background music,    │
+│              │  Meta's source separator │  keep only vocals            │
+│              │  60s chunks, GPU         │  Load → process → unload    │
+│              └────────────┬────────────┘                               │
+│                           ▼                                             │
+│              ┌─────────────────────────┐                               │
+│         Step 3│  Trim intro/outro       │  Remove first/last 30s      │
+│              │  (jingles)              │  (catches what Demucs misses)│
+│              └────────────┬────────────┘                               │
+│                           ▼                                             │
+│              ┌─────────────────────────┐                               │
+│         Step 4│  pyannote 3.1           │  Speaker diarization         │
+│              │  (GPU)                  │  Who speaks when             │
+│              │                         │  Filter: >92% = monologue   │
+│              └────────────┬────────────┘                               │
+│                           ▼                                             │
+│              ┌─────────────────────────┐                               │
+│         Step 5│  OpenAI Whisper turbo   │  Transcribe each speaker    │
+│              │  (GPU, Italian)         │  segment individually        │
+│              │  beam_size=5            │  Word-level timestamps       │
+│              └────────────┬────────────┘                               │
+│                           ▼                                             │
+│              ┌─────────────────────────┐                               │
+│         Step 6│  Stereo Split           │  Speaker A → left channel   │
+│              │                         │  Speaker B → right channel   │
+│              └────────────┬────────────┘                               │
+│                           ▼                                             │
+│              ┌─────────────────────────┐                               │
+│         Step 7│  Segment (30-120s)      │  Split at speaker turns     │
+│              │  + Filter               │  Drop single-speaker chunks  │
+│              └────────────┬────────────┘                               │
+│                           ▼                                             │
+│              ┌─────────────────────────┐                               │
+│              │  moshi-finetune output  │  Stereo WAV (24kHz 16-bit)  │
+│              │                         │  + JSON transcript           │
+│              │                         │  + JSONL manifest            │
+│              └─────────────────────────┘                               │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ## Output Format
 
 ```json
 {
-  "episode_id": "ep_abc123",
-  "source": "podcast_name",
-  "language": "it",
-  "segments": [
+  "audio_file": "data/moshi/train/episode_0001.wav",
+  "duration": 47.3,
+  "source_episode": "abc123",
+  "transcript": [
     {
-      "start": 12.340,
-      "end": 15.780,
-      "speaker": "Speaker_A",
-      "text": "Allooora no aspetta— cioè volevo dire che...",
-      "raw_text": "allora no aspetta cioè volevo dire che",
-      "paralinguistics": [
-        {"type": "elongation", "token": "Allooora", "start": 12.340, "end": 12.980},
-        {"type": "false_start", "token": "no aspetta—", "start": 13.100, "end": 13.650},
-        {"type": "filler", "token": "cioè", "start": 13.700, "end": 13.950}
-      ],
-      "emotion": "hesitant",
-      "confidence": 0.94
+      "start": 0.0,
+      "end": 3.2,
+      "speaker": "user",
+      "text": "Ciao, come stai oggi?"
     },
     {
-      "start": 15.200,
-      "end": 15.600,
-      "speaker": "Speaker_B",
-      "text": "[mhm]",
-      "paralinguistics": [
-        {"type": "backchannel", "token": "mhm", "start": 15.200, "end": 15.600}
-      ],
-      "emotion": "neutral",
-      "confidence": 0.91
+      "start": 3.5,
+      "end": 8.1,
+      "speaker": "agent",
+      "text": "Bene grazie! Oggi parliamo di qualcosa di interessante."
     }
   ]
 }
 ```
 
-## Pipeline Architecture
+Audio: stereo WAV, 24kHz, 16-bit PCM. Left channel = agent (Speaker A), right channel = user (Speaker B).
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        VOCI PIPELINE                            │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌───────────┐    ┌──────────┐    ┌──────────┐                 │
-│  │  Podcast   │───▶│ Download │───▶│  Audio   │                │
-│  │  Scraper   │    │ Manager  │    │  Store   │                │
-│  └───────────┘    └──────────┘    └─────┬────┘                 │
-│                                         │                       │
-│                          ┌──────────────┼──────────────┐        │
-│                          ▼              ▼              ▼        │
-│                   ┌────────────┐ ┌────────────┐ ┌──────────┐   │
-│         Pass 1:   │  faster-   │ │  pyannote  │ │  Word    │   │
-│                   │  whisper   │ │  3.1       │ │  Align   │   │
-│                   │  (ASR)     │ │  (diariz.) │ │          │   │
-│                   └─────┬──────┘ └─────┬──────┘ └────┬─────┘   │
-│                         └──────────────┼─────────────┘          │
-│                                        ▼                        │
-│                              ┌──────────────────┐               │
-│                              │  Base Transcript  │              │
-│                              │  + Speakers       │              │
-│                              │  + Timestamps     │              │
-│                              └────────┬─────────┘               │
-│                                       │                         │
-│                          ┌────────────┼────────────┐            │
-│                          ▼            ▼            ▼            │
-│                   ┌───────────┐ ┌──────────┐ ┌──────────────┐  │
-│         Pass 2:   │  HuBERT/  │ │ emotion  │ │ Paralinguist │  │
-│                   │  WavLM    │ │ 2vec     │ │ ic Detector  │  │
-│                   │  (SSL)    │ │          │ │              │  │
-│                   └─────┬─────┘ └────┬─────┘ └──────┬───────┘  │
-│                         └────────────┼──────────────┘           │
-│                                      ▼                          │
-│                            ┌──────────────────┐                 │
-│                            │   Rich Merged    │                 │
-│                            │   Transcript     │                 │
-│                            └────────┬─────────┘                 │
-│                                     ▼                           │
-│                          ┌──────────────────┐                   │
-│                          │  Quality Filter  │                   │
-│                          │  + Validation    │                   │
-│                          └────────┬─────────┘                   │
-│                                   ▼                             │
-│                          ┌──────────────────┐                   │
-│                          │  Final Dataset   │                   │
-│                          │  (JSON + Audio)  │                   │
-│                          └──────────────────┘                   │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+## Hardware
 
-## Paralinguistic Taxonomy
+| Machine | Role | Specs |
+|---------|------|-------|
+| DGX Spark 1 (spark-9000) | Pipeline + downloads | NVIDIA GB10 Blackwell, 128GB RAM, 3.7TB NVMe |
+| DGX Spark 2 (spark-f5af) | Pipeline (via Ethernet to Spark 1) | Same specs |
 
-Voci defines a rich set of non-verbal and paraverbal events:
+Both GPUs run at ~80-95% utilization. Pipeline produces ~2h of clean training data per hour per Spark.
 
-| Category | Tags | Examples |
-|----------|------|----------|
-| **Fillers** | `filler` | ehm, mhm, ah, eh, boh, mah |
-| **Backchannels** | `backchannel` | sì sì, eh già, no?, certo, esatto |
-| **Laughter** | `laugh`, `laugh_speech` | [risata], speaking while laughing |
-| **Hesitations** | `hesitation`, `false_start` | "volevo— no cioè", "è— è—" |
-| **Elongations** | `elongation` | "allooora", "nooo", "vabbè" |
-| **Breath/Sighs** | `breath`, `sigh` | [sospiro], [respiro] |
-| **Emotions** | `emotion` | hesitant, sarcastic, excited, annoyed, amused |
-| **Overlap** | `overlap_start`, `overlap_end` | simultaneous speech markers |
-| **Repairs** | `repair` | "a Roma— a Milano volevo dire" |
-| **Code-switching** | `code_switch` | dialect/English insertions |
-| **Discourse markers** | `discourse` | "allora", "comunque", "tipo", "praticamente" |
+## Scripts
 
-## Hardware Requirements
-
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| GPU | RTX 3090 (24GB) | DGX Spark (128GB) or A100 |
-| RAM | 32GB | 64GB+ |
-| Storage | 10TB (audio + dataset) | 20TB |
-| Network | 100 Mbps | 1 Gbps |
-
-## Project Structure
-
-```
-voci/
-├── README.md
-├── docs/                        # Detailed documentation (wiki)
-│   ├── 01-architecture.md       # System architecture deep dive
-│   ├── 02-podcast-scraper.md    # Scraper design and source list
-│   ├── 03-pass1-asr.md          # WhisperX pipeline details
-│   ├── 04-pass2-paralinguistics.md  # Self-supervised + fine-tune
-│   ├── 05-annotation-guide.md   # Manual annotation protocol
-│   ├── 06-dataset-format.md     # Output schema specification
-│   ├── 07-quality-control.md    # Filtering and validation
-│   └── 08-hardware-setup.md     # DGX Spark / GPU setup guide
-├── src/
-│   ├── scraper/                 # Podcast discovery and download
-│   ├── pass1/                   # ASR + diarization pipeline
-│   ├── pass2/                   # Paralinguistic detection
-│   ├── merge/                   # Transcript merger
-│   ├── quality/                 # Quality filtering
-│   └── utils/                   # Shared utilities
-├── configs/                     # Pipeline configuration files
-├── scripts/                     # CLI entry points
-├── tests/                       # Test suite
-├── annotation/                  # Annotation tools and guidelines
-└── pyproject.toml
-```
+| Script | Purpose |
+|--------|---------|
+| `src/scraper/cli.py` | Podcast discovery (Spreaker, Apple Charts, Podcast Index) |
+| `scripts/diverse_download.py` | Download max N episodes per show for speaker diversity |
+| `scripts/convert_single_model.py` | Main conversion pipeline (Demucs + diarize + transcribe + stereo) |
+| `scripts/reprocess_demucs.py` | Batch reprocess existing WAVs through Demucs |
+| `scripts/mimi_test.py` | Test Mimi codec quality on Italian audio |
+| `scripts/parallel_download.py` | Multi-threaded bulk downloader |
+| `scripts/start_workers.sh` | Launch conversion workers on a Spark |
+| `scripts/start_spark2.sh` | Launch pipeline on Spark 2 |
+| `scripts/status.sh` | Quick pipeline status check |
+| `scripts/monitor_fast.sh` | Live monitor (run on Spark 1) |
+| `scripts/live_monitor.sh` | Live monitor (run from Windows) |
 
 ## Quick Start
 
 ```bash
-# Clone
-git clone https://github.com/AntonioGison/voci.git
-cd voci
+# 1. Discover Italian podcasts
+python -m src.scraper.cli discover
 
-# Install
-pip install -e ".[dev]"
+# 2. Fetch episode lists
+python -m src.scraper.cli episodes
 
-# Configure
-cp configs/default.yaml configs/local.yaml
-# Edit local.yaml with your paths and GPU settings
+# 3. Download diverse episodes (max 5 per show)
+python scripts/diverse_download.py
 
-# Step 1: Scrape Italian podcasts
-voci scrape --language it --output ./data/raw
+# 4. Run conversion pipeline
+python scripts/convert_single_model.py \
+  --data-dir ./data/prod \
+  --output-dir ./data/moshi/output \
+  --episode-list data/prod/slice_0.txt \
+  --hf-token YOUR_HF_TOKEN
 
-# Step 2: Run ASR + diarization (Pass 1)
-voci transcribe --input ./data/raw --output ./data/pass1 --model large-v3-turbo
-
-# Step 3: Pre-train paralinguistic model (Pass 2 - self-supervised)
-voci pretrain --input ./data/raw --output ./models/hubert-it --hours 5000
-
-# Step 4: Fine-tune on annotated subset
-voci finetune --model ./models/hubert-it --annotations ./data/annotated --output ./models/para-it
-
-# Step 5: Run paralinguistic detection
-voci detect --input ./data/raw --transcript ./data/pass1 --model ./models/para-it --output ./data/pass2
-
-# Step 6: Merge and filter
-voci merge --pass1 ./data/pass1 --pass2 ./data/pass2 --output ./data/final --min-confidence 0.85
+# 5. Check status
+bash scripts/status.sh
 ```
 
-## Roadmap
+## Quality Controls
 
-- [ ] **Phase 1 — Infrastructure**: Podcast scraper, download manager, storage
-- [ ] **Phase 2 — Pass 1 Pipeline**: WhisperX integration, batch processing, GPU scheduling
-- [ ] **Phase 3 — Self-Supervised Pre-training**: HuBERT/WavLM training on full corpus
-- [ ] **Phase 4 — Annotation Tooling**: Web UI for paralinguistic annotation
-- [ ] **Phase 5 — Pass 2 Pipeline**: Fine-tuned paralinguistic detector
-- [ ] **Phase 6 — Merge + Quality**: Transcript merger, confidence filtering, validation
-- [ ] **Phase 7 — Dataset Release**: Packaging, documentation, HuggingFace upload
+- **Demucs**: Strips background music/jingles, keeps only vocals
+- **Monologue filter**: Skip episodes where one speaker >92% of talk time
+- **Segment filter**: Drop segments with only one speaker present
+- **Intro/outro trim**: Remove first/last 30 seconds (jingles)
+- **Duration filter**: Only process episodes 10-120 minutes long
+
+## Stats (live)
+
+| Metric | Value |
+|--------|-------|
+| Shows discovered | 5,064 |
+| Episodes cataloged | 466,036 |
+| Total audio cataloged | 174,955h |
+| Yield rate | ~60% of processed episodes produce output |
+| Output rate | ~2h clean data per hour per GPU |
 
 ## License
 
 Apache 2.0
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
